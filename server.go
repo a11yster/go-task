@@ -61,7 +61,7 @@ func (s *Server) Start(ctx context.Context) {
 		close(work)
 	}()
 
-	for i := 0; i < defaultConcurrency; i++ {
+	for i := 0; i < s.concurrency; i++ {
 		wg.Add(1)
 		go s.process(ctx, work, &wg)
 	}
