@@ -25,6 +25,7 @@ func SumProcessor(b []byte) error {
 		return err
 	}
 
+	time.Sleep(100 * time.Millisecond)
 	fmt.Printf("Sum: %d + %d = %d\n", pl.Arg1, pl.Arg2, pl.Arg1+pl.Arg2)
 
 	return nil
@@ -44,18 +45,20 @@ func main() {
 	srv.RegisterProcessor("add", SumProcessor)
 
 	go func() {
-		for i := 0; i < 1000; i++ {
-			b, _ := json.Marshal(SumPayload{Arg1: i, Arg2: 4})
-			task := gotask.NewTask("add", b)
-			if err := srv.AddTask(ctx, task); err != nil {
-				log.Fatal(err)
+		for i := 0; i < 100; i++ {
+			for j := 0; j < 10; j++ {
+				b, _ := json.Marshal(SumPayload{Arg1: i*10 + j, Arg2: 4})
+				task := gotask.NewTask("add", b)
+				task.Queue = "add-queue"
+				if err := srv.AddTask(ctx, task); err != nil {
+					log.Fatal(err)
+				}
 			}
-			time.Sleep(time.Second)
+			time.Sleep(500 * time.Millisecond)
 		}
 	}()
 
 	srv.Start(ctx)
 
-	// Create a task payload.
 	fmt.Println("exit..")
 }
