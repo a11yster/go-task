@@ -57,7 +57,7 @@ func (s *Server) Start(ctx context.Context) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		s.consume(ctx, work, defaultQueue)
+		s.consume(ctx, work, s.queue)
 		close(work)
 	}()
 
