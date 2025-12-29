@@ -28,13 +28,21 @@ func NewServer() *Server {
 
 func (s *Server) Start(ctx context.Context) {
 	log.Println("go-task: server starting")
-	var work chan []byte = make(chan []byte)
+	work := make(chan []byte)
 	var wg sync.WaitGroup
-	go s.consume(ctx, work, defaultQueue)
-	for range defaultConcurrency {
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		s.consume(ctx, work, defaultQueue)
+		close(work)
+	}()
+
+	for i := 0; i < defaultConcurrency; i++ {
 		wg.Add(1)
 		go s.process(ctx, work, &wg)
 	}
+
 	wg.Wait()
 }
 
@@ -64,17 +72,28 @@ func (s *Server) consume(ctx context.Context, work chan []byte, queue string) {
 }
 
 func (s *Server) process(ctx context.Context, work chan []byte, wg *sync.WaitGroup) {
+	defer wg.Done()
 	for {
 		select {
 		case <-ctx.Done():
-			wg.Done()
 			return
-		case work := <-work:
+		case b, ok := <-work:
+			if !ok {
+				return
+			}
 			var task Task
-			decoder := gob.NewDecoder(bytes.NewBuffer(work))
-			decoder.Decode(&task)
+			decoder := gob.NewDecoder(bytes.NewBuffer(b))
+			if err := decoder.Decode(&task); err != nil {
+				log.Printf("go-task: failed to decode task payload: %v", err)
+				continue
+			}
+
 			log.Printf("go-task: processing task [handler=%s]", task.Handler)
 			handler := s.getHandler(task.Handler)
+			if handler == nil {
+				log.Printf("go-task: no processor registered [handler=%s]", task.Handler)
+				continue
+			}
 			if err := handler(task.Payload); err != nil {
 				log.Printf("go-task: task failed [handler=%s, error=%v]", task.Handler, err)
 			} else {
