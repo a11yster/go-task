@@ -4,26 +4,49 @@ import (
 	"bytes"
 	"context"
 	"encoding/gob"
+	"fmt"
 	"log"
+	"runtime"
 	"sync"
-
-	"github.com/a11yster/go-task/brokers/redis"
 )
 
 const defaultConcurrency = 1
+const defaultQueue = "gotask:tasks"
 
 type Handler func([]byte) error
 
-type Server struct {
-	processors map[string]Handler
-	broker     Broker
+type ServerOpts struct {
+	Broker      Broker
+	Concurrency int
+	Queue       string
 }
 
-func NewServer() *Server {
-	return &Server{
-		processors: make(map[string]Handler),
-		broker:     redis.New(),
+type Server struct {
+	processors  map[string]Handler
+	broker      Broker
+	concurrency int
+	queue       string
+	mu          sync.RWMutex
+}
+
+func NewServer(opts ServerOpts) (*Server, error) {
+	if opts.Broker == nil {
+		return nil, fmt.Errorf("broker is missing in server opts")
 	}
+
+	if opts.Concurrency <= 0 {
+		opts.Concurrency = runtime.GOMAXPROCS(0)
+	}
+
+	if opts.Queue == "" {
+		opts.Queue = defaultQueue
+	}
+	return &Server{
+		processors:  make(map[string]Handler),
+		broker:      opts.Broker,
+		concurrency: opts.Concurrency,
+		queue:       opts.Queue,
+	}, nil
 }
 
 func (s *Server) Start(ctx context.Context) {
@@ -60,10 +83,14 @@ func (s *Server) RegisterProcessor(name string, handler Handler) {
 }
 
 func (s *Server) registerHandler(name string, handler Handler) {
+	s.mu.Lock()
 	s.processors[name] = handler
+	s.mu.Unlock()
 }
 
 func (s *Server) getHandler(name string) Handler {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	return s.processors[name]
 }
 

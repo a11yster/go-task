@@ -1,7 +1,5 @@
 package gotask
 
-const defaultQueue = "gotask:tasks"
-
 type Task struct {
 	Queue   string
 	Handler string
