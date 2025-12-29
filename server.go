@@ -89,8 +89,8 @@ func (s *Server) registerHandler(name string, handler Handler) {
 }
 
 func (s *Server) getHandler(name string) Handler {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	return s.processors[name]
 }
 
