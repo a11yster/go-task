@@ -10,6 +10,7 @@ import (
 	"time"
 
 	gotask "github.com/a11yster/go-task"
+	"github.com/a11yster/go-task/brokers/redis"
 )
 
 type SumPayload struct {
@@ -31,7 +32,15 @@ func SumProcessor(b []byte) error {
 
 func main() {
 	ctx, _ := signal.NotifyContext(context.Background(), os.Interrupt, os.Kill)
-	srv := gotask.NewServer()
+	broker := redis.New()
+	srv, err := gotask.NewServer(gotask.ServerOpts{
+		Broker:      broker,
+		Concurrency: 5,
+		Queue:       "add-queue",
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
 	srv.RegisterProcessor("add", SumProcessor)
 
 	go func() {
