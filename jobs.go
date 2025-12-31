@@ -1,6 +1,11 @@
 package gotask
 
-import "time"
+import (
+	"fmt"
+	"time"
+
+	"github.com/google/uuid"
+)
 
 // DefaultQueue is the default queue name used when no queue is specified in JobOpts
 const DefaultQueue = "gotask:tasks"
@@ -102,4 +107,61 @@ type Meta struct {
 
 	// PrevJobResult contains the result bytes from the previous job in a chain.
 	PrevJobResult []byte
+}
+
+// DefaultMeta creates a Meta struct with default values filled in.
+// This is called when a job is enqueued to initialize its metadata.
+func DefaultMeta(opts JobOpts) Meta {
+	if opts.Id == "" {
+		opts.Id = uuid.NewString()
+	}
+
+	if opts.Queue == "" {
+		opts.Queue = DefaultQueue
+	}
+
+	return Meta{
+		Id:       opts.Id,
+		Status:   StatusStarted,
+		Queue:    opts.Queue,
+		MaxRetry: opts.MaxRetries,
+		Schedule: opts.Schedule,
+	}
+}
+
+// NewJob creates a new Job with validation.
+// This is the constructor that clients use to create jobs.
+func NewJob(handler string, payload []byte, opts JobOpts) (Job, error) {
+	if handler == "" {
+		return Job{}, fmt.Errorf("handler name cannot be empty")
+	}
+
+	if opts.Queue == "" {
+		opts.Queue = DefaultQueue
+	}
+
+	return Job{
+		Task:    handler,
+		Payload: payload,
+		Opts:    opts,
+	}, nil
+}
+
+// JobMessage is the serialized form of a job that's sent through the broker.
+// It combines the Job (what to do) with Meta (runtime state).
+type JobMessage struct {
+	// Meta is embedded, so JobMessage has all Meta fields directly accessible
+	Meta
+
+	// Job is a pointer to the actual job definition
+	Job *Job
+}
+
+// message() is a helper method on Job to create a JobMessage.
+// This is called internally by Enqueue() to prepare the job for serialization.
+func (j *Job) message(meta Meta) JobMessage {
+	return JobMessage{
+		Meta: meta,
+		Job:  j,
+	}
 }
