@@ -1,17 +1,16 @@
 package gotask
 
 import (
-	"bytes"
 	"context"
-	"encoding/gob"
 	"fmt"
 	"log"
 	"runtime"
 	"sync"
+
+	"github.com/vmihailenco/msgpack/v5"
 )
 
 const defaultConcurrency = 1
-const defaultQueue = "gotask:tasks"
 
 type Handler func([]byte) error
 
@@ -39,7 +38,7 @@ func NewServer(opts ServerOpts) (*Server, error) {
 	}
 
 	if opts.Queue == "" {
-		opts.Queue = defaultQueue
+		opts.Queue = DefaultQueue
 	}
 	return &Server{
 		processors:  make(map[string]Handler),
@@ -69,13 +68,21 @@ func (s *Server) Start(ctx context.Context) {
 	wg.Wait()
 }
 
-func (s *Server) AddTask(ctx context.Context, task *Task) error {
-	var b bytes.Buffer
-	var encoder = gob.NewEncoder(&b)
-	if err := encoder.Encode(task); err != nil {
-		return err
+func (s *Server) Enqueue(ctx context.Context, job Job) (string, error) {
+	meta := DefaultMeta(job.Opts)
+
+	msg := job.message(meta)
+
+	b, err := msgpack.Marshal(msg)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal job message: %w", err)
 	}
-	return s.broker.Enqueue(ctx, b.Bytes(), task.Queue)
+
+	if err := s.broker.Enqueue(ctx, b, meta.Queue); err != nil {
+		return "", fmt.Errorf("error enquing the job to the broker")
+	}
+
+	return msg.Id, nil
 }
 
 func (s *Server) RegisterProcessor(name string, handler Handler) {
@@ -108,23 +115,23 @@ func (s *Server) process(ctx context.Context, work chan []byte, wg *sync.WaitGro
 			if !ok {
 				return
 			}
-			var task Task
-			decoder := gob.NewDecoder(bytes.NewBuffer(b))
-			if err := decoder.Decode(&task); err != nil {
-				log.Printf("go-task: failed to decode task payload: %v", err)
+			var message JobMessage
+			if err := msgpack.Unmarshal(b, &message); err != nil {
+				log.Printf("go-task: failed to decode job message: %v", err)
 				continue
 			}
 
-			log.Printf("go-task: processing task [handler=%s]", task.Handler)
-			handler := s.getHandler(task.Handler)
+			log.Printf("go-task: processing job [id=%s, handler=%s]", message.Id, message.Job.Task)
+
+			handler := s.getHandler(message.Job.Task)
 			if handler == nil {
-				log.Printf("go-task: no processor registered [handler=%s]", task.Handler)
+				log.Printf("go-task: no processor registered [id=%s, handler=%s]", message.Id, message.Job.Task)
 				continue
 			}
-			if err := handler(task.Payload); err != nil {
-				log.Printf("go-task: task failed [handler=%s, error=%v]", task.Handler, err)
+			if err := handler(message.Job.Payload); err != nil {
+				log.Printf("go-task: job failed [id=%s, handler=%s, error=%v]", message.Id, message.Job.Task, err)
 			} else {
-				log.Printf("go-task: task completed [handler=%s]", task.Handler)
+				log.Printf("go-task: job completed [id=%s, handler=%s]", message.Id, message.Job.Task)
 			}
 		}
 	}

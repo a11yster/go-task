@@ -18,7 +18,6 @@ type SumPayload struct {
 	Arg2 int `json:"arg2"`
 }
 
-// SumProcessor prints the sum of two integer arguments.
 func SumProcessor(b []byte) error {
 	var pl SumPayload
 	if err := json.Unmarshal(b, &pl); err != nil {
@@ -48,10 +47,23 @@ func main() {
 		for i := 0; i < 100; i++ {
 			for j := 0; j < 10; j++ {
 				b, _ := json.Marshal(SumPayload{Arg1: i*10 + j, Arg2: 4})
-				task := gotask.NewTask("add", b)
-				task.Queue = "add-queue"
-				if err := srv.AddTask(ctx, task); err != nil {
-					log.Fatal(err)
+
+				job, err := gotask.NewJob("add", b, gotask.JobOpts{
+					Queue: "add-queue",
+				})
+				if err != nil {
+					log.Printf("Failed to create job: %v", err)
+					continue
+				}
+
+				jobID, err := srv.Enqueue(ctx, job)
+				if err != nil {
+					log.Printf("Failed to enqueue job: %v", err)
+					continue
+				}
+
+				if j == 0 {
+					log.Printf("Enqueued batch %d, first job ID: %s", i, jobID)
 				}
 			}
 			time.Sleep(500 * time.Millisecond)
