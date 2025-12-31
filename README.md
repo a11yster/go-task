@@ -32,46 +32,37 @@ import (
 
 func main() {
     ctx := context.Background()
-
-    // Create a Redis broker
     broker := redis.New()
 
-    // Create a server with options
     srv, err := gotask.NewServer(gotask.ServerOpts{
         Broker:      broker,
-        Concurrency: 5,  // Number of concurrent workers
-        Queue:       "my-queue",  // Queue name (optional, defaults to "gotask:tasks")
+        Concurrency: 5,
+        Queue:       "my-queue",
     })
     if err != nil {
         log.Fatal(err)
     }
 
-    // Register a processor
     srv.RegisterProcessor("my-handler", func(payload []byte) error {
-        // Process the task
         var data map[string]interface{}
         json.Unmarshal(payload, &data)
         // ... your processing logic
         return nil
     })
 
-    // Start the server (blocking)
     srv.Start(ctx)
 }
 ```
 
-## Adding Tasks
+## Adding Jobs
 
 ```go
-// Create a task
 payload, _ := json.Marshal(map[string]string{"message": "hello"})
-task := gotask.NewTask("my-handler", payload)
+job, _ := gotask.NewJob("my-handler", payload, gotask.JobOpts{
+    Queue: "custom-queue",  // Optional
+})
 
-// Optionally set a custom queue
-task.Queue = "custom-queue"
-
-// Add the task to the queue
-err := srv.AddTask(ctx, task)
+jobID, err := srv.Enqueue(ctx, job)
 if err != nil {
     log.Fatal(err)
 }
@@ -85,7 +76,7 @@ if err != nil {
 
 ## Broker Interface
 
-The library uses a `Broker` interface, allowing you to implement custom brokers:
+Implement custom brokers using the `Broker` interface:
 
 ```go
 type Broker interface {
@@ -94,7 +85,7 @@ type Broker interface {
 }
 ```
 
-A Redis broker implementation is provided in `brokers/redis`.
+A Redis implementation is provided in `brokers/redis`.
 
 ## Requirements
 
