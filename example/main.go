@@ -10,7 +10,8 @@ import (
 	"time"
 
 	gotask "github.com/a11yster/go-task"
-	"github.com/a11yster/go-task/brokers/redis"
+	brokerredis "github.com/a11yster/go-task/brokers/redis"
+	resultredis "github.com/a11yster/go-task/results/redis"
 )
 
 type SumPayload struct {
@@ -18,7 +19,7 @@ type SumPayload struct {
 	Arg2 int `json:"arg2"`
 }
 
-func SumProcessor(b []byte) error {
+func SumProcessor(b []byte, ctx gotask.JobCtx) error {
 	var pl SumPayload
 	if err := json.Unmarshal(b, &pl); err != nil {
 		return err
@@ -32,9 +33,11 @@ func SumProcessor(b []byte) error {
 
 func main() {
 	ctx, _ := signal.NotifyContext(context.Background(), os.Interrupt, os.Kill)
-	broker := redis.New()
+	broker := brokerredis.New()
+	results := resultredis.New()
 	srv, err := gotask.NewServer(gotask.ServerOpts{
 		Broker:      broker,
+		Results:     results,
 		Concurrency: 5,
 		Queue:       "add-queue",
 	})
