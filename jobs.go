@@ -14,6 +14,8 @@ const DefaultQueue = "gotask:tasks"
 // defaultMaxRetry is the default maximum retry count
 const defaultMaxRetry uint32 = 1
 
+const jobPrefix = "job:msg"
+
 // Status constants define the lifecycle states of a job
 const (
 	// StatusStarted is the initial state when a job is pushed onto the broker.

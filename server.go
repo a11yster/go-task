@@ -12,10 +12,11 @@ import (
 
 const defaultConcurrency = 1
 
-type Handler func([]byte) error
+type Handler func([]byte, JobCtx) error
 
 type ServerOpts struct {
 	Broker      Broker
+	Results     Results
 	Concurrency int
 	Queue       string
 }
@@ -23,6 +24,7 @@ type ServerOpts struct {
 type Server struct {
 	processors  map[string]Handler
 	broker      Broker
+	results     Results
 	concurrency int
 	queue       string
 	mu          sync.RWMutex
@@ -37,12 +39,17 @@ func NewServer(opts ServerOpts) (*Server, error) {
 		opts.Concurrency = runtime.GOMAXPROCS(0)
 	}
 
+	if opts.Results == nil {
+		return nil, fmt.Errorf("results is required in server opts")
+	}
+
 	if opts.Queue == "" {
 		opts.Queue = DefaultQueue
 	}
 	return &Server{
 		processors:  make(map[string]Handler),
 		broker:      opts.Broker,
+		results:     opts.Results,
 		concurrency: opts.Concurrency,
 		queue:       opts.Queue,
 	}, nil
@@ -95,10 +102,14 @@ func (s *Server) registerHandler(name string, handler Handler) {
 	s.mu.Unlock()
 }
 
-func (s *Server) getHandler(name string) Handler {
+func (s *Server) getHandler(name string) (Handler, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.processors[name]
+	handler, ok := s.processors[name]
+	if !ok {
+		return nil, fmt.Errorf("handler %s not found", name)
+	}
+	return handler, nil
 }
 
 func (s *Server) consume(ctx context.Context, work chan []byte, queue string) {
@@ -123,16 +134,53 @@ func (s *Server) process(ctx context.Context, work chan []byte, wg *sync.WaitGro
 
 			log.Printf("go-task: processing job [id=%s, handler=%s]", message.Id, message.Job.Task)
 
-			handler := s.getHandler(message.Job.Task)
-			if handler == nil {
-				log.Printf("go-task: no processor registered [id=%s, handler=%s]", message.Id, message.Job.Task)
+			handler, err := s.getHandler(message.Job.Task)
+			if err != nil {
+				log.Printf("go-task: %v", err)
 				continue
 			}
-			if err := handler(message.Job.Payload); err != nil {
-				log.Printf("go-task: job failed [id=%s, handler=%s, error=%v]", message.Id, message.Job.Task, err)
-			} else {
-				log.Printf("go-task: job completed [id=%s, handler=%s]", message.Id, message.Job.Task)
+
+			if err := s.execJob(ctx, message, handler); err != nil {
+				log.Printf("go-task: job execution error [id=%s, error=%v]", message.Id, err)
 			}
 		}
 	}
+}
+
+func (s *Server) execJob(ctx context.Context, msg JobMessage, handler Handler) error {
+	jobCtx := JobCtx{
+		Context: ctx,
+		Meta:    msg.Meta,
+		store:   s.results,
+	}
+
+	err := handler(msg.Job.Payload, jobCtx)
+
+	if err != nil {
+		msg.PrevErr = err.Error()
+	}
+
+	if msg.MaxRetry > msg.Retried {
+		return s.retryJob(ctx, msg)
+	}
+
+	return nil
+}
+
+func (s *Server) retryJob(ctx context.Context, msg JobMessage) error {
+	msg.Retried++
+
+	b, err := msgpack.Marshal(msg)
+	if err != nil {
+		return fmt.Errorf("failed to marshall job: %w", err)
+	}
+
+	if err := s.broker.Enqueue(ctx, b, msg.Queue); err != nil {
+		return fmt.Errorf("failed to enqueue job: %w", err)
+	}
+
+	log.Printf("go-task: job retrying [id=%s, attempt=%d/%d]",
+		msg.Id, msg.Retried, msg.MaxRetry)
+
+	return nil
 }
