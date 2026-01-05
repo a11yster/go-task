@@ -258,3 +258,36 @@ func (s *Server) statusRetrying(ctx context.Context, msg JobMessage) error {
 	msg.Status = StatusRetrying
 	return s.setJobMessage(ctx, msg)
 }
+
+func (s *Server) GetJob(ctx context.Context, id string) (JobMessage, error) {
+	b, err := s.GetResult(ctx, jobPrefix+id)
+	if err != nil {
+		return JobMessage{}, err
+	}
+
+	var msg JobMessage
+	if err := msgpack.Unmarshal(b, &msg); err != nil {
+		return JobMessage{}, fmt.Errorf("failed to unmarshal job message: %w", err)
+	}
+	return msg, nil
+}
+
+func (s *Server) GetResult(ctx context.Context, id string) ([]byte, error) {
+	b, err := s.results.Get(ctx, id)
+	if err == nil {
+		return b, nil
+	}
+	return nil, err
+}
+
+func (s *Server) DeleteJob(ctx context.Context, id string) error {
+	return s.results.DeleteJob(ctx, id)
+}
+
+func (s *Server) GetFailed(ctx context.Context) ([]string, error) {
+	return s.results.GetFailed(ctx)
+}
+
+func (s *Server) GetSuccess(ctx context.Context) ([]string, error) {
+	return s.results.GetSuccess(ctx)
+}
