@@ -1,6 +1,7 @@
 package gotask
 
 import (
+	"context"
 	"fmt"
 	"time"
 
@@ -107,6 +108,18 @@ type Meta struct {
 
 	// PrevJobResult contains the result bytes from the previous job in a chain.
 	PrevJobResult []byte
+}
+
+type JobCtx struct {
+	context.Context
+
+	Meta Meta
+
+	store Results
+}
+
+func (c JobCtx) Save(b []byte) error {
+	return c.store.Set(c, c.Meta.Id, b)
 }
 
 // DefaultMeta creates a Meta struct with default values filled in.

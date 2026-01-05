@@ -13,7 +13,7 @@ type Broker interface {
 // Results is the interface for job state persistence.
 type Results interface {
 	Get(ctx context.Context, id string) ([]byte, error)
-	Set(ctx context.Context, id string, b []byte)
+	Set(ctx context.Context, id string, b []byte) error
 	DeleteJob(ctx context.Context, id string) error
 	GetFailed(ctx context.Context) ([]string, error)
 	GetSuccess(ctx context.Context) ([]string, error)

@@ -26,3 +26,4 @@ This example demonstrates how to use the go-task task queue system.
 - Enqueues 1000 tasks, each with different arguments
 - Processes tasks concurrently as they are consumed from Redis
 - Gracefully shuts down on interrupt signal (Ctrl+C)
+
