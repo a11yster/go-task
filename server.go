@@ -6,6 +6,7 @@ import (
 	"log"
 	"runtime"
 	"sync"
+	"time"
 
 	"github.com/vmihailenco/msgpack/v5"
 )
@@ -80,6 +81,10 @@ func (s *Server) Enqueue(ctx context.Context, job Job) (string, error) {
 
 	msg := job.message(meta)
 
+	if err := s.statusStarted(ctx, msg); err != nil {
+		return "", fmt.Errorf("failed to set job status: %w", err)
+	}
+
 	b, err := msgpack.Marshal(msg)
 	if err != nil {
 		return "", fmt.Errorf("failed to marshal job message: %w", err)
@@ -140,6 +145,11 @@ func (s *Server) process(ctx context.Context, work chan []byte, wg *sync.WaitGro
 				continue
 			}
 
+			if err := s.statusProcessing(ctx, message); err != nil {
+				log.Printf("go-task: failed to set processing status: %v", err)
+				continue
+			}
+
 			if err := s.execJob(ctx, message, handler); err != nil {
 				log.Printf("go-task: job execution error [id=%s, error=%v]", message.Id, err)
 			}
@@ -158,18 +168,33 @@ func (s *Server) execJob(ctx context.Context, msg JobMessage, handler Handler) e
 
 	if err != nil {
 		msg.PrevErr = err.Error()
+
+		if msg.MaxRetry > msg.Retried {
+			return s.retryJob(ctx, msg)
+		}
+
+		if statusErr := s.statusFailed(ctx, msg); statusErr != nil {
+			return fmt.Errorf("failed to set failed status: %w", statusErr)
+		}
+		log.Printf("go-task: job failed permanently [id=%s, handler=%s, error=%v]",
+			msg.Id, msg.Job.Task, err)
+		return nil
 	}
 
-	if msg.MaxRetry > msg.Retried {
-		return s.retryJob(ctx, msg)
+	if err := s.statusDone(ctx, msg); err != nil {
+		return fmt.Errorf("failed to set done status: %w", err)
 	}
-
+	log.Printf("go-task: job completed [id=%s, handler=%s]", msg.Id, msg.Job.Task)
 	return nil
 }
 
 func (s *Server) retryJob(ctx context.Context, msg JobMessage) error {
 	msg.Retried++
 
+	if err := s.statusRetrying(ctx, msg); err != nil {
+		return fmt.Errorf("failed to set retrying status: %w", err)
+	}
+	
 	b, err := msgpack.Marshal(msg)
 	if err != nil {
 		return fmt.Errorf("failed to marshall job: %w", err)
@@ -183,4 +208,53 @@ func (s *Server) retryJob(ctx context.Context, msg JobMessage) error {
 		msg.Id, msg.Retried, msg.MaxRetry)
 
 	return nil
+}
+
+func (s *Server) setJobMessage(ctx context.Context, msg JobMessage) error {
+	b, err := msgpack.Marshal(msg)
+	if err != nil {
+		return fmt.Errorf("failed to marshal job message: %w", err)
+	}
+	if err := s.results.Set(ctx, jobPrefix+msg.Id, b); err != nil {
+		return fmt.Errorf("failed to set job message: %w", err)
+	}
+	return nil
+}
+
+func (s *Server) statusStarted(ctx context.Context, msg JobMessage) error {
+	msg.ProcessedAt = time.Now()
+	msg.Status = StatusStarted
+	return s.setJobMessage(ctx, msg)
+}
+
+func (s *Server) statusProcessing(ctx context.Context, msg JobMessage) error {
+	msg.ProcessedAt = time.Now()
+	msg.Status = StatusProcessing
+	return s.setJobMessage(ctx, msg)
+}
+
+func (s *Server) statusDone(ctx context.Context, msg JobMessage) error {
+	msg.ProcessedAt = time.Now()
+	msg.Status = StatusDone
+
+	if err := s.results.SetSuccess(ctx, msg.Id); err != nil {
+		return err
+	}
+	return s.setJobMessage(ctx, msg)
+}
+
+func (s *Server) statusFailed(ctx context.Context, msg JobMessage) error {
+	msg.ProcessedAt = time.Now()
+	msg.Status = StatusFailed
+
+	if err := s.results.SetFailed(ctx, msg.Id); err != nil {
+		return err
+	}
+	return s.setJobMessage(ctx, msg)
+}
+
+func (s *Server) statusRetrying(ctx context.Context, msg JobMessage) error {
+	msg.ProcessedAt = time.Now()
+	msg.Status = StatusRetrying
+	return s.setJobMessage(ctx, msg)
 }
