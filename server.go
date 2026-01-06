@@ -13,6 +13,27 @@ import (
 
 const defaultConcurrency = 1
 
+type TaskOpts struct {
+	Concurrency  uint32
+	Queue        string
+	SuccessCB    func(JobCtx)
+	ProcessingCB func(JobCtx)
+	RetryingCB   func(JobCtx, error)
+	FailedCB     func(JobCtx, error)
+}
+
+type Task struct {
+	name    string
+	handler Handler
+	opts    TaskOpts
+}
+
+type TaskInfo struct {
+	Name        string `json:"name" msgpack:"name"`
+	Queue       string `json:"queue" msgpack:"queue"`
+	Concurrency uint32 `json:"concurrency" msgpack:"concurrency"`
+}
+
 type Handler func([]byte, JobCtx) error
 
 type ServerOpts struct {
@@ -23,7 +44,7 @@ type ServerOpts struct {
 }
 
 type Server struct {
-	processors  map[string]Handler
+	tasks       map[string]Task
 	broker      Broker
 	results     Results
 	concurrency int
@@ -48,7 +69,7 @@ func NewServer(opts ServerOpts) (*Server, error) {
 		opts.Queue = DefaultQueue
 	}
 	return &Server{
-		processors:  make(map[string]Handler),
+		tasks:       make(map[string]Task),
 		broker:      opts.Broker,
 		results:     opts.Results,
 		concurrency: opts.Concurrency,
@@ -97,24 +118,47 @@ func (s *Server) Enqueue(ctx context.Context, job Job) (string, error) {
 	return msg.Id, nil
 }
 
-func (s *Server) RegisterProcessor(name string, handler Handler) {
-	s.registerHandler(name, handler)
-}
+func (s *Server) RegisterTask(name string, handler Handler, opts TaskOpts) error {
+	if opts.Queue == "" {
+		opts.Queue = s.queue
+	}
 
-func (s *Server) registerHandler(name string, handler Handler) {
+	if opts.Concurrency <= 0 {
+		opts.Concurrency = uint32(s.concurrency)
+	}
+
 	s.mu.Lock()
-	s.processors[name] = handler
-	s.mu.Unlock()
+	defer s.mu.Unlock()
+
+	if _, exists := s.tasks[name]; exists {
+		return fmt.Errorf("task %s is already registered", name)
+	}
+
+	s.tasks[name] = Task{
+		name:    name,
+		handler: handler,
+		opts:    opts,
+	}
+	log.Printf("go-task: registered task [name=%s, queue=%s, concurrency=%d]",
+		name, opts.Queue, opts.Concurrency)
+
+	return nil
 }
 
-func (s *Server) getHandler(name string) (Handler, error) {
+func (s *Server) RegisterProcessor(name string, handler Handler) {
+	s.RegisterTask(name, handler, TaskOpts{})
+}
+
+func (s *Server) getTask(name string) (Task, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	handler, ok := s.processors[name]
+
+	task, ok := s.tasks[name]
 	if !ok {
-		return nil, fmt.Errorf("handler %s not found", name)
+		return Task{}, fmt.Errorf("task %s not found", name)
 	}
-	return handler, nil
+
+	return task, nil
 }
 
 func (s *Server) consume(ctx context.Context, work chan []byte, queue string) {
@@ -139,7 +183,7 @@ func (s *Server) process(ctx context.Context, work chan []byte, wg *sync.WaitGro
 
 			log.Printf("go-task: processing job [id=%s, handler=%s]", message.Id, message.Job.Task)
 
-			handler, err := s.getHandler(message.Job.Task)
+			task, err := s.getTask(message.Job.Task)
 			if err != nil {
 				log.Printf("go-task: %v", err)
 				continue
@@ -150,41 +194,89 @@ func (s *Server) process(ctx context.Context, work chan []byte, wg *sync.WaitGro
 				continue
 			}
 
-			if err := s.execJob(ctx, message, handler); err != nil {
+			if err := s.execJob(ctx, message, task); err != nil {
 				log.Printf("go-task: job execution error [id=%s, error=%v]", message.Id, err)
 			}
 		}
 	}
 }
 
-func (s *Server) execJob(ctx context.Context, msg JobMessage, handler Handler) error {
+func (s *Server) execJob(ctx context.Context, msg JobMessage, task Task) error {
 	jobCtx := JobCtx{
-		Context: ctx,
-		Meta:    msg.Meta,
-		store:   s.results,
+		Meta:  msg.Meta,
+		store: s.results,
 	}
 
-	err := handler(msg.Job.Payload, jobCtx)
+	var (
+		errChan          = make(chan error, 1)
+		err              error
+		jctx, cancelFunc = context.WithCancel(ctx)
+	)
+	defer cancelFunc()
+
+	if msg.Job.Opts.Timeout > 0 {
+		jctx, cancelFunc = context.WithDeadline(ctx, time.Now().Add(msg.Job.Opts.Timeout))
+	}
+
+	jobCtx.Context = jctx
+
+	if task.opts.ProcessingCB != nil {
+		task.opts.ProcessingCB(jobCtx)
+	}
+
+	go func() {
+		errChan <- task.handler(msg.Job.Payload, jobCtx)
+		close(errChan)
+	}()
+
+	select {
+	case <-jctx.Done():
+		cancelFunc()
+		err = jctx.Err()
+		if err == context.Canceled {
+			err = nil
+		}
+
+	case handlerErr := <-errChan:
+		cancelFunc()
+		err = handlerErr
+		if err == context.Canceled {
+			err = nil
+		}
+	}
 
 	if err != nil {
 		msg.PrevErr = err.Error()
 
 		if msg.MaxRetry > msg.Retried {
+			if task.opts.RetryingCB != nil {
+				task.opts.RetryingCB(jobCtx, err)
+			}
 			return s.retryJob(ctx, msg)
+		}
+
+		if task.opts.FailedCB != nil {
+			task.opts.FailedCB(jobCtx, err)
 		}
 
 		if statusErr := s.statusFailed(ctx, msg); statusErr != nil {
 			return fmt.Errorf("failed to set failed status: %w", statusErr)
 		}
-		log.Printf("go-task: job failed permanently [id=%s, handler=%s, error=%v]",
+
+		log.Printf("go-task: job failed permanently [id=%s, task=%s, error=%v]",
 			msg.Id, msg.Job.Task, err)
 		return nil
+	}
+
+	if task.opts.SuccessCB != nil {
+		task.opts.SuccessCB(jobCtx)
 	}
 
 	if err := s.statusDone(ctx, msg); err != nil {
 		return fmt.Errorf("failed to set done status: %w", err)
 	}
-	log.Printf("go-task: job completed [id=%s, handler=%s]", msg.Id, msg.Job.Task)
+
+	log.Printf("go-task: job completed [id=%s, task=%s]", msg.Id, msg.Job.Task)
 	return nil
 }
 
@@ -194,7 +286,7 @@ func (s *Server) retryJob(ctx context.Context, msg JobMessage) error {
 	if err := s.statusRetrying(ctx, msg); err != nil {
 		return fmt.Errorf("failed to set retrying status: %w", err)
 	}
-	
+
 	b, err := msgpack.Marshal(msg)
 	if err != nil {
 		return fmt.Errorf("failed to marshall job: %w", err)
