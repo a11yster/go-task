@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/robfig/cron/v3"
 	"github.com/vmihailenco/msgpack/v5"
 )
 
@@ -50,6 +51,7 @@ type Server struct {
 	concurrency int
 	queue       string
 	mu          sync.RWMutex
+	cron        *cron.Cron
 }
 
 func NewServer(opts ServerOpts) (*Server, error) {
@@ -74,6 +76,7 @@ func NewServer(opts ServerOpts) (*Server, error) {
 		results:     opts.Results,
 		concurrency: opts.Concurrency,
 		queue:       opts.Queue,
+		cron:        cron.New(),
 	}, nil
 }
 
@@ -82,6 +85,7 @@ func (s *Server) Start(ctx context.Context) {
 	work := make(chan []byte)
 	var wg sync.WaitGroup
 
+	s.startCronScheduler(ctx, &wg)
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -97,8 +101,56 @@ func (s *Server) Start(ctx context.Context) {
 	wg.Wait()
 }
 
+func (s *Server) startCronScheduler(ctx context.Context, wg *sync.WaitGroup) {
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
+		s.cron.Start()
+		log.Println("go-task: cron scheduler started")
+
+		<-ctx.Done()
+		log.Println("go-task: shutting down cron scheduler...")
+
+		cronCtx := s.cron.Stop()
+		select {
+		case <-cronCtx.Done():
+			log.Println("go-task: cron scheduler stopped")
+		case <-time.After(5 * time.Second):
+			log.Println("go-task: cron scheduler stop timeout")
+		}
+	}()
+}
+
 func (s *Server) Enqueue(ctx context.Context, job Job) (string, error) {
 	meta := DefaultMeta(job.Opts)
+
+	if job.Opts.Schedule != "" {
+		sch, err := cron.ParseStandard(job.Opts.Schedule)
+		if err != nil {
+			return "", fmt.Errorf("invalid cron schedule: %w", err)
+		}
+
+		if job.Opts.ETA.IsZero() {
+			job.Opts.ETA = sch.Next(time.Now())
+		}
+
+		nextJob, err := NewJob(job.Task, job.Payload, job.Opts)
+		if err != nil {
+			return "", fmt.Errorf("failed to create next job: %w", err)
+		}
+
+		nextJob.Opts.ETA = sch.Next(job.Opts.ETA)
+
+		job.OnSuccess = append(job.OnSuccess, &nextJob)
+
+	}
 
 	msg := job.message(meta)
 
@@ -106,13 +158,34 @@ func (s *Server) Enqueue(ctx context.Context, job Job) (string, error) {
 		return "", fmt.Errorf("failed to set job status: %w", err)
 	}
 
+	if !job.Opts.ETA.IsZero() {
+		return s.enqueueScheduled(ctx, msg)
+	}
+
+	return s.enqueueMessage(ctx, msg)
+}
+
+func (s *Server) enqueueScheduled(ctx context.Context, msg JobMessage) (string, error) {
 	b, err := msgpack.Marshal(msg)
 	if err != nil {
 		return "", fmt.Errorf("failed to marshal job message: %w", err)
 	}
 
-	if err := s.broker.Enqueue(ctx, b, meta.Queue); err != nil {
-		return "", fmt.Errorf("error enquing the job to the broker")
+	if err := s.broker.EnqueueScheduled(ctx, b, msg.Queue, msg.Job.Opts.ETA); err != nil {
+		return "", err
+	}
+
+	return msg.Id, nil
+}
+
+func (s *Server) enqueueMessage(ctx context.Context, msg JobMessage) (string, error) {
+	b, err := msgpack.Marshal(msg)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal job message: %w", err)
+	}
+
+	if err := s.broker.Enqueue(ctx, b, msg.Queue); err != nil {
+		return "", err
 	}
 
 	return msg.Id, nil
